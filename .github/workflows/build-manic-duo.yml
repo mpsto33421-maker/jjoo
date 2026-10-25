@@ -84,6 +84,57 @@ jobs:
           print('PLzmaSDK remains at the original 1.5.0 source commit:', revision)
           PY
 
+      - name: Restore previous compilation work
+        id: compile_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ManicDuoDerived
+          key: duo-ios271-${{ github.run_id }}
+          restore-keys: duo-ios271-
+
+      - name: Resolve source packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project ManicEmu/ManicEmu.xcodeproj \
+            -scheme ManicEmuSideload \
+            -configuration SideloadRelease \
+            -derivedDataPath "$RUNNER_TEMP/ManicDuoDerived" \
+            2>&1 | tee "$RUNNER_TEMP/manic-duo-dependencies.log"
+
+      - name: Apply upstream Realm comparator compatibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, re, stat
+          # Same comparator change as https://github.com/realm/realm-core/pull/8096
+          path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'ManicDuoDerived/SourcePackages/checkouts/realm-core/src/external/s2/s2polyline.cc'
+          source = path.read_text()
+          marker = '  int i;\n  int j;\n  bool i_in_progress;'
+          operator = '''  inline bool operator<(SearchState const& rhs) const {
+              if (i < rhs.i) return true;
+              if (i > rhs.i) return false;
+              if (j < rhs.j) return true;
+              if (j > rhs.j) return false;
+              return !i_in_progress && rhs.i_in_progress;
+            }
+
+          '''
+          if 'inline bool operator<(SearchState const& rhs) const' not in source:
+              if source.count(marker) != 1:
+                  raise SystemExit('Unexpected SearchState structure; refusing patch')
+              source = source.replace(marker, operator + marker, 1)
+              pattern = r'namespace std \{\s*template<>\s*struct less<SearchState> \{.*?\};\s*\}  // namespace std'
+              source, count = re.subn(pattern, '', source, flags=re.S)
+              if count != 1:
+                  raise SystemExit('Expected one original SearchState comparator')
+              path.chmod(path.stat().st_mode | stat.S_IWUSR)
+              path.write_text(source)
+          print('Realm SearchState comparator uses the upstream Xcode-compatible operator')
+          PY
+
       - name: Build unsigned Sideload app
         shell: bash
         run: |
@@ -127,6 +178,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ManicEMU-Duo-build-log
-          path: ${{ runner.temp }}/manic-duo-build.log
+          path: ${{ runner.temp }}/manic-duo-*.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Save compilation work for the next attempt
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ManicDuoDerived
+          key: duo-ios271-${{ github.run_id }}
