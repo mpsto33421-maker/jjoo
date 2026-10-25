@@ -37,12 +37,13 @@ jobs:
                   sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'], env=env, text=True).strip()
                   version = tuple(int(n) for n in sdk.split('.'))
                   if version >= (27, 1):
-                      candidates.append((version, developer))
+                      stable = not any(label in app.lower() for label in ('beta', 'candidate', '_rc'))
+                      candidates.append((stable, version, developer))
               except (subprocess.CalledProcessError, ValueError):
                   pass
           if not candidates:
               raise SystemExit('No iOS 27.1+ SDK installed on this runner. Build stopped without producing an IPA.')
-          version, developer = max(candidates)
+          stable, version, developer = max(candidates)
           with open(os.environ['GITHUB_ENV'], 'a') as output:
               output.write('DEVELOPER_DIR=' + developer + '\n')
           print('Selected:', developer, 'SDK:', version)
@@ -64,6 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild \
+            -skipPackagePluginValidation \
             -project ManicEmu/ManicEmu.xcodeproj \
             -scheme ManicEmuSideload \
             -configuration SideloadRelease \
