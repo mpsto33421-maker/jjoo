@@ -1,0 +1,106 @@
+name: Manic EMU Duo build candidate
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-manic-duo.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - name: Check out official 2.0.1 source
+        uses: actions/checkout@v4
+        with:
+          repository: Manic-EMU/ManicEMU
+          ref: fbaeab79c214d5920bb51afa6f2d786fb2b12a58
+          submodules: recursive
+          lfs: true
+          persist-credentials: false
+
+      - name: Select Xcode 27.1 or newer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, os, subprocess
+          candidates = []
+          for app in glob.glob('/Applications/Xcode*.app'):
+              developer = app + '/Contents/Developer'
+              env = dict(os.environ, DEVELOPER_DIR=developer)
+              try:
+                  sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-version'], env=env, text=True).strip()
+                  version = tuple(int(n) for n in sdk.split('.'))
+                  if version >= (27, 1):
+                      candidates.append((version, developer))
+              except (subprocess.CalledProcessError, ValueError):
+                  pass
+          if not candidates:
+              raise SystemExit('No iOS 27.1+ SDK installed on this runner. Build stopped without producing an IPA.')
+          version, developer = max(candidates)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('DEVELOPER_DIR=' + developer + '\n')
+          print('Selected:', developer, 'SDK:', version)
+          PY
+
+      - name: Verify build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          git lfs pull
+          git submodule foreach --recursive 'git lfs pull'
+          bash Scripts/VerifyLFS.sh
+          df -h .
+
+      - name: Build unsigned Sideload app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ManicEmu/ManicEmu.xcodeproj \
+            -scheme ManicEmuSideload \
+            -configuration SideloadRelease \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/ManicDuoDerived" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/manic-duo-build.log"
+
+      - name: Package candidate IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/ManicDuoDerived/Build/Products/SideloadRelease-iphoneos/ManicEmuSideload.app"
+          test -d "$app"
+          sdk=$(/usr/libexec/PlistBuddy -c 'Print :DTSDKName' "$app/Info.plist")
+          echo "Built SDK: $sdk"
+          staging="$RUNNER_TEMP/ManicDuoPackage"
+          mkdir -p "$staging/Payload"
+          ditto "$app" "$staging/Payload/ManicEmuSideload.app"
+          cd "$staging"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$RUNNER_TEMP/ManicEMU-2.0.1-Duo-candidate-unsigned.ipa"
+          shasum -a 256 "$RUNNER_TEMP/ManicEMU-2.0.1-Duo-candidate-unsigned.ipa"
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ManicEMU-Duo-candidate-unsigned
+          path: ${{ runner.temp }}/ManicEMU-2.0.1-Duo-candidate-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ManicEMU-Duo-build-log
+          path: ${{ runner.temp }}/manic-duo-build.log
+          if-no-files-found: ignore
+          retention-days: 7
